@@ -1,12 +1,21 @@
 {
   "projects": {
-    "default": "aiodcounter03"
+    "default": "aiodcounter03",
+    "production": "aiodcounter03",
+    "staging": "aiodcounter03-staging"
   },
   "targets": {
     "aiodcounter03": {
       "hosting": {
         "aiodcounter03-demo": [
           "aiodcounter03-demo"
+        ]
+      }
+    },
+    "aiodcounter03-staging": {
+      "hosting": {
+        "aiodcounter03-staging-demo": [
+          "aiodcounter03-staging-demo"
         ]
       }
     }
