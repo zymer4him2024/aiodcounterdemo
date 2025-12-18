@@ -116,7 +116,7 @@ exports.ingestCounts = functions.https.onRequest(async (req, res) => {
 
     // --- Daily + daypart aggregates (NO scanning needed)
     const timeZone = "America/Manaus"; // Manaus, Brazil timezone
-    const { dateStr, daypart } = getDateParts(ts, timeZone);
+    const { dateStr, daypart, hour } = getDateParts(ts, timeZone);
     const { monthStr, monthName } = getMonthParts(ts, timeZone);
 
     const dayRef = camRef.collection("daily").doc(dateStr);
@@ -341,6 +341,43 @@ exports.ingestCounts = functions.https.onRequest(async (req, res) => {
     } catch (e) {
       console.error("Error updating monthly aggregates:", e);
       // Continue even if monthly update fails
+    }
+
+    // Handle hourly aggregates - pre-aggregate for dashboard queries
+    try {
+      const hourStr = String(hour).padStart(2, '0');
+      const hourId = `${dateStr}_${hourStr}`;
+      const hourRef = camRef.collection("hourly").doc(hourId);
+
+      await db.runTransaction(async (tx) => {
+        const hourDoc = await tx.get(hourRef);
+        const currentHourData = hourDoc.exists ? hourDoc.data() : {
+          dateStr,
+          hour,
+          totals: { total: 0, car: 0, truck: 0, bus: 0, motorcycle: 0, person: 0 }
+        };
+        
+        const newTotals = {
+          total: Math.round(safeNum(currentHourData.totals?.total || 0) + safeNum(total)),
+          car: Math.round(safeNum(currentHourData.totals?.car || 0) + safeNum(counts.car || 0)),
+          truck: Math.round(safeNum(currentHourData.totals?.truck || 0) + safeNum(counts.truck || 0)),
+          bus: Math.round(safeNum(currentHourData.totals?.bus || 0) + safeNum(counts.bus || 0)),
+          motorcycle: Math.round(safeNum(currentHourData.totals?.motorcycle || 0) + safeNum(counts.motorcycle || 0)),
+          person: Math.round(safeNum(currentHourData.totals?.person || 0) + safeNum(counts.person || 0))
+        };
+        
+        tx.set(hourRef, {
+          dateStr,
+          hour,
+          timeZone,
+          totals: newTotals,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+      });
+      console.log(`Updated hourly aggregate for ${hourId}: hour=${hour}`);
+    } catch (e) {
+      console.error("Error updating hourly aggregates:", e);
+      // Continue even if hourly update fails
     }
 
     return res.status(200).json({ ok: true, dateStr, daypart, monthStr, reset: shouldReset });

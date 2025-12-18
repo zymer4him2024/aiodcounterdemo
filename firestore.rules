@@ -30,6 +30,11 @@ service cloud.firestore {
         match /monthlyArchive/{monthId} {
           allow read: if true;
         }
+        
+        // Allow reading hourly subcollection (pre-aggregated hourly data)
+        match /hourly/{hourId} {
+          allow read: if true;
+        }
       }
     }
     

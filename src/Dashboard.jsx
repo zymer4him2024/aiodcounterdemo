@@ -749,7 +749,8 @@ function DynamicPricingSection({ dayparts, totals, cameraId, siteId, t }) {
     });
   };
 
-  // Fetch hourly data from windows collection - updates once per hour
+  // Fetch hourly data from hourly aggregates collection - OLAP optimization
+  // Uses pre-aggregated data instead of scanning raw windows collection
   useEffect(() => {
     const fetchHourlyData = async () => {
       try {
@@ -764,97 +765,58 @@ function DynamicPricingSection({ dayparts, totals, cameraId, siteId, t }) {
           day: "2-digit",
         }).format(now);
 
-        // Calculate start and end timestamps for today (4am to 1am next day)
-        const todayDate = new Date(todayStr + "T00:00:00");
-        const startOfDay = new Date(todayDate);
-        startOfDay.setHours(4, 0, 0, 0);
-        
-        const endOfDay = new Date(todayDate);
-        endOfDay.setDate(endOfDay.getDate() + 1);
-        endOfDay.setHours(1, 0, 0, 0);
-
-        const startTs = startOfDay.getTime();
-        const endTs = endOfDay.getTime();
-
-        // Query windows collection
-        const windowsRef = collection(
+        // Query hourly aggregates collection (pre-aggregated, much faster)
+        const hourlyRef = collection(
           db,
           "sites", siteId,
           "cameras", cameraId,
-          "windows"
+          "hourly"
         );
 
         const q = query(
-          windowsRef,
-          where("ts", ">=", startTs),
-          where("ts", "<", endTs)
+          hourlyRef,
+          where("dateStr", "==", todayStr),
+          orderBy("hour", "asc")
         );
 
         const snapshot = await getDocs(q);
-        const windows = [];
+        const hourlyDataMap = {};
+        
         snapshot.forEach((doc) => {
           const data = doc.data();
-          windows.push({
-            ts: data.ts,
-            counts: normalizeCounts(data.counts || {}),
-            total: data.total || 0,
-          });
-        });
-
-        // Aggregate by hour
-        const hourlyAgg = {};
-        hourlySlots.forEach((hour) => {
-          hourlyAgg[hour] = {
-            vehicles: 0,
-            pedestrians: 0,
-            impressions: 0,
-            count: 0,
+          const hour = data.hour;
+          const totals = data.totals || {};
+          
+          // Calculate vehicles (sum of car, truck, bus, motorcycle)
+          const vehicles = (totals.car || 0) + (totals.truck || 0) + 
+                          (totals.bus || 0) + (totals.motorcycle || 0);
+          
+          hourlyDataMap[hour] = {
+            hour,
+            hourLabel: formatHour(hour),
+            vehicles: Math.round(vehicles),
+            pedestrians: Math.round(totals.person || 0),
+            impressions: Math.round(totals.total || 0),
+            totalTraffic: Math.round(vehicles + (totals.person || 0)),
           };
         });
 
-        windows.forEach((win) => {
-          const winDate = new Date(win.ts);
-          const winHour = new Intl.DateTimeFormat("en-US", {
-            timeZone,
-            hour: "2-digit",
-            hour12: false,
-          }).format(winDate);
-          const hour = Number(winHour);
-
-          let slotHour = hour;
-          if (hour >= 4 && hour < 24) {
-            slotHour = hour;
-          } else if (hour >= 0 && hour <= 1) {
-            slotHour = hour;
-          } else {
-            return;
-          }
-
-          if (hourlyAgg[slotHour]) {
-            hourlyAgg[slotHour].vehicles += (win.counts.car || 0) + (win.counts.truck || 0) + 
-                                       (win.counts.bus || 0) + (win.counts.motorcycle || 0);
-            hourlyAgg[slotHour].pedestrians += win.counts.person || 0;
-            hourlyAgg[slotHour].impressions += win.total || 0;
-            hourlyAgg[slotHour].count += 1;
-          }
-        });
-
-        // Convert to array - use totals per hour (not averages)
+        // Fill in missing hours with zeros (for hours with no data yet)
         const data = hourlySlots.map((hour) => {
-          const agg = hourlyAgg[hour];
-          return {
+          return hourlyDataMap[hour] || {
             hour,
             hourLabel: formatHour(hour),
-            vehicles: Math.round(agg.vehicles),
-            pedestrians: Math.round(agg.pedestrians),
-            impressions: Math.round(agg.impressions),
-            totalTraffic: Math.round(agg.vehicles + agg.pedestrians),
+            vehicles: 0,
+            pedestrians: 0,
+            impressions: 0,
+            totalTraffic: 0,
           };
         });
 
         setHourlyData(data);
       } catch (error) {
-        console.error("Error fetching hourly data:", error);
+        console.error("Error fetching hourly aggregates:", error);
+        // Fallback: estimate from dayparts if hourly aggregates not available
         const fallbackData = estimateHourlyFromDayparts(daypartsRef.current, hourlySlots, formatHour);
         setHourlyData(fallbackData);
       }
