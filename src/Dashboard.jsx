@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState, useRef } from "react";
+import React, { useEffect, useMemo, useState, useRef, useCallback } from "react";
 import { doc, onSnapshot, collection, getDocs, query, orderBy, limit, where } from "firebase/firestore";
 import { db } from "./firebase";
 import { useLanguage } from "./i18n/LanguageContext";
@@ -703,33 +703,33 @@ function DynamicPricingSection({ dayparts, totals, cameraId, siteId, t }) {
   }, []);
 
   // Format hour for display (e.g., 4 -> "4 AM", 14 -> "2 PM")
-  const formatHour = (hour) => {
+  const formatHour = useCallback((hour) => {
     if (hour === 0) return "12 AM";
     if (hour < 12) return `${hour} AM`;
     if (hour === 12) return "12 PM";
     return `${hour - 12} PM`;
-  };
+  }, []);
 
   // Fallback: Estimate hourly data from daypart aggregates
+  // Updated to match Cloud Function daypart periods: Morning (4-10), Afternoon (10-16), Evening (16-22), Night (22-4)
   const estimateHourlyFromDayparts = (dayparts, slots, formatHour) => {
     const daypartHours = {
-      night: [22, 23, 0, 1, 2, 3, 4], // 22-4 (7 hours, but we only show 4-1)
-      morning: [5, 6, 7, 8, 9, 10, 11], // 5-11 (7 hours)
-      afternoon: [12, 13, 14, 15, 16, 17], // 12-17 (6 hours)
-      evening: [18, 19, 20, 21], // 18-21 (4 hours)
+      night: [22, 23, 0, 1, 2, 3], // 22-4 (6 hours, but we only show 22-1)
+      morning: [4, 5, 6, 7, 8, 9], // 4-10 (6 hours)
+      afternoon: [10, 11, 12, 13, 14, 15], // 10-16 (6 hours)
+      evening: [16, 17, 18, 19, 20, 21], // 16-22 (6 hours)
     };
 
     return slots.map((hour) => {
-      // Determine which daypart this hour belongs to
+      // Determine which daypart this hour belongs to (matching Cloud Function logic)
       let daypartKey = "night";
-      if (hour >= 5 && hour < 12) daypartKey = "morning";
-      else if (hour >= 12 && hour < 18) daypartKey = "afternoon";
-      else if (hour >= 18 && hour < 22) daypartKey = "evening";
-      // Handle night hours (22-23, 0-4)
-      else if (hour >= 22 || hour < 5) daypartKey = "night";
+      if (hour >= 4 && hour < 10) daypartKey = "morning";
+      else if (hour >= 10 && hour < 16) daypartKey = "afternoon";
+      else if (hour >= 16 && hour < 22) daypartKey = "evening";
+      // else: night (hour >= 22 || hour < 4)
 
       const daypartData = dayparts[daypartKey] || {};
-      const hoursInDaypart = daypartHours[daypartKey].length;
+      const hoursInDaypart = daypartHours[daypartKey] ? daypartHours[daypartKey].length : 6;
       
       const vehicles = Math.round(
         ((daypartData.car || 0) + (daypartData.truck || 0) + 
@@ -801,23 +801,32 @@ function DynamicPricingSection({ dayparts, totals, cameraId, siteId, t }) {
           };
         });
 
-        // Fill in missing hours with zeros (for hours with no data yet)
-        const data = hourlySlots.map((hour) => {
-          return hourlyDataMap[hour] || {
-            hour,
-            hourLabel: formatHour(hour),
-            vehicles: 0,
-            pedestrians: 0,
-            impressions: 0,
-            totalTraffic: 0,
-          };
-        });
-
-        setHourlyData(data);
+        // Check if we have any hourly data
+        const hasHourlyData = Object.keys(hourlyDataMap).length > 0;
+        
+        if (hasHourlyData) {
+          // Fill in missing hours with zeros (for hours with no data yet)
+          const data = hourlySlots.map((hour) => {
+            return hourlyDataMap[hour] || {
+              hour,
+              hourLabel: formatHour(hour),
+              vehicles: 0,
+              pedestrians: 0,
+              impressions: 0,
+              totalTraffic: 0,
+            };
+          });
+          setHourlyData(data);
+        } else {
+          // No hourly data - use fallback from dayparts (use daypartsData which is independently fetched)
+          console.log("No hourly aggregates found, using dayparts fallback");
+          const fallbackData = estimateHourlyFromDayparts(daypartsData, hourlySlots, formatHour);
+          setHourlyData(fallbackData);
+        }
       } catch (error) {
         console.error("Error fetching hourly aggregates:", error);
         // Fallback: estimate from dayparts if hourly aggregates not available
-        const fallbackData = estimateHourlyFromDayparts(daypartsRef.current, hourlySlots, formatHour);
+        const fallbackData = estimateHourlyFromDayparts(daypartsData, hourlySlots, formatHour);
         setHourlyData(fallbackData);
       }
     };
@@ -834,7 +843,7 @@ function DynamicPricingSection({ dayparts, totals, cameraId, siteId, t }) {
     return () => {
       clearInterval(intervalId);
     };
-  }, [siteId, cameraId, hourlySlots]);
+  }, [siteId, cameraId, hourlySlots, daypartsData, formatHour]); // Added daypartsData and formatHour to dependencies
 
   // Time bands mapping (using dayparts) - keep for table
   // Updated to match daypart hours: Morning Peak: 4am-10am, Afternoon Peak: 10am-4pm, 
