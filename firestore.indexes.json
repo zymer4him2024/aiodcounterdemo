@@ -23,16 +23,6 @@
           "order": "ASCENDING"
         }
       ]
-    },
-    {
-      "collectionGroup": "windows",
-      "queryScope": "COLLECTION",
-      "fields": [
-        {
-          "fieldPath": "ts",
-          "order": "ASCENDING"
-        }
-      ]
     }
   ],
   "fieldOverrides": []
