@@ -1,0 +1,15 @@
+{
+  "projects": {
+    "default": "aiodcounter03"
+  },
+  "targets": {
+    "aiodcounter03": {
+      "hosting": {
+        "aiodcounter03-demo": [
+          "aiodcounter03-demo"
+        ]
+      }
+    }
+  },
+  "etags": {}
+}

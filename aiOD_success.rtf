@@ -1,0 +1,497 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2865
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fmodern\fcharset0 Courier;\f1\fnil\fcharset0 AppleColorEmoji;\f2\froman\fcharset0 Times-Bold;
+\f3\froman\fcharset0 Times-Roman;}
+{\colortbl;\red255\green255\blue255;\red0\green0\blue0;}
+{\*\expandedcolortbl;;\cssrgb\c0\c0\c0;}
+\margl1440\margr1440\vieww24800\viewh16360\viewkind0
+\deftab720
+\pard\pardeftab720\sl336\slmult1\partightenfactor0
+
+\f0\fs26 \cf0 \expnd0\expndtw0\kerning0
+cd ~/hailo-rpi5-examples || exit 1\
+\pard\pardeftab720\partightenfactor0
+\cf0 \
+cat > basic_pipelines/line_counter_firebase.py <<'PY'\
+from __future__ import annotations\
+\
+import os\
+import time\
+import json\
+import math\
+import threading\
+import argparse \
+import sys\
+from pathlib import Path\
+from typing import Dict, List, Tuple, Optional, Set\
+\
+import cv2\
+import requests\
+\
+import gi\
+gi.require_version("Gst", "1.0")\
+from gi.repository import Gst, GLib\
+\
+import hailo\
+from hailo_apps.hailo_app_python.core.common.buffer_utils import get_caps_from_pad, get_numpy_from_buffer\
+from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import app_callback_class\
+from hailo_apps.hailo_app_python.apps.detection.detection_pipeline import GStreamerDetectionApp\
+\
+\
+# --- Helpers (omitted for brevity, remains unchanged) ---\
+def safe_env_get(key: str, default: str = "") -> str:\
+    val = os.getenv(key, default).strip()\
+    if key == "FIREBASE_INGEST_URL" and val and not val.startswith("http"):\
+        print(f"
+\f1 \uc0\u9888 \u65039 
+\f0  Adding 'https://' to \{key\} for requests library compatibility.")\
+        val = "https://" + val\
+    if key == "FIREBASE_INGEST_URL" and val and not val.endswith("/"):\
+         val = val + "/"\
+    return val\
+\
+def load_project_env():\
+    root = Path(__file__).resolve().parents[1]\
+    env_path = root / ".env"\
+    if not env_path.exists():\
+        return\
+    for line in env_path.read_text().splitlines():\
+        line = line.strip()\
+        if not line or line.startswith("#") or "=" not in line:\
+            continue\
+        k, v = line.split("=", 1)\
+        k = k.strip()\
+        v = v.strip().strip('"').strip("'")\
+        if k and (k not in os.environ):\
+            os.environ[k] = v\
+\
+# --- Global Arguments (Set in main) ---\
+args = None\
+\
+# --- Geometry & Tracker (omitted for brevity, remains unchanged) ---\
+def side_of_line(p: Tuple[int, int], a: Tuple[int, int], b: Tuple[int, int]) -> float:\
+    return (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])\
+\
+def within_segment_bbox(p: Tuple[int, int], a: Tuple[int, int], b: Tuple[int, int], pad: int = 160) -> bool:\
+    x_min = min(a[0], b[0]) - pad\
+    x_max = max(a[0], b[0]) + pad\
+    y_min = min(a[1], b[1]) - pad\
+    y_max = max(a[1], b[1]) + pad\
+    return x_min <= p[0] <= x_max and y_min <= p[1] <= y_max\
+\
+class Track:\
+    def __init__(self, tid: int, cls: str, c: Tuple[int, int], now: float):\
+        self.id = tid; self.cls = cls; self.c = c; self.last_seen = now\
+        self.last_side = 0.0; self.crossed = False\
+\
+class SimpleCentroidTracker:\
+    def __init__(self, max_dist_px: int = 95, max_age_sec: float = 1.3):\
+        self.max_dist_px = max_dist_px; self.max_age_sec = max_age_sec\
+        self.next_id = 1; self.tracks: Dict[int, Track] = \{\}\
+\
+    def _dist(self, a: Tuple[int, int], b: Tuple[int, int]) -> float:\
+        return math.hypot(a[0] - b[0], a[1] - b[1])\
+\
+    def purge(self, now: float):\
+        dead = [tid for tid, tr in self.tracks.items() if (now - tr.last_seen) > self.max_age_sec]\
+        for tid in dead: del self.tracks[tid]\
+\
+    def update(self, detections: List[dict], now: float) -> List[Track]:\
+        self.purge(now); used = set(); out: List[Track] = []\
+        for det in detections:\
+            cls = det["cls"]; c = det["centroid"]\
+            best_tid, best_d = None, 1e9\
+            for tid, tr in self.tracks.items():\
+                if tid in used: continue\
+                if tr.cls != cls: continue\
+                d = self._dist(c, tr.c);\
+                if d < best_d: best_d, best_tid = d, tid\
+            if best_tid is not None and best_d <= self.max_dist_px:\
+                tr = self.tracks[best_tid]; tr.c = c; tr.last_seen = now\
+                used.add(best_tid); out.append(tr)\
+            else:\
+                tid = self.next_id; self.next_id += 1\
+                tr = Track(tid, cls, c, now); self.tracks[tid] = tr\
+                used.add(tid); out.append(tr)\
+        return out\
+\
+\
+# --- Firebase sender (omitted for brevity, remains unchanged) ---\
+class FirebaseSender:\
+    def __init__(self):\
+        self.url = safe_env_get("FIREBASE_INGEST_URL", "").strip()\
+        self.api_key = safe_env_get("FIREBASE_API_KEY", "").strip()\
+        self.site_id = safe_env_get("SITE_ID", "demo-site").strip()\
+        self.camera_id = safe_env_get("CAMERA_ID", "usb-cam-1").strip()\
+        self.enabled = bool(self.url)\
+\
+    def send(self, payload: dict):\
+        if not self.enabled: return\
+        headers = \{"Content-Type": "application/json"\}\
+        if self.api_key: headers["x-api-key"] = self.api_key\
+        try:\
+            r = requests.post(self.url, headers=headers, json=payload, timeout=10)\
+            if r.status_code >= 300:\
+                print(f"
+\f1 \uc0\u10060 
+\f0  Firebase send failed: \{r.status_code\} \{r.text[:200]\}")\
+            else:\
+                print(f"
+\f1 \uc0\u9989 
+\f0  Sent to Firebase: \{r.status_code\}")\
+        except Exception as e:\
+            print(f"
+\f1 \uc0\u10060 
+\f0  Firebase send exception: \{e\}")\
+\
+\
+# --- Shared State (Thread-Safe) ---\
+class SharedState:\
+    def __init__(self):\
+        self.lock = threading.Lock()\
+        self.frame = None; self.hud_text = "Waiting..."\
+        # UPDATED: Added motorcycle, Person count is now for pedestrians\
+        self.counts = \{"car": 0, "truck": 0, "bus": 0, "motorcycle": 0, "person": 0\} \
+        self.running = True; self.app_instance = None \
+\
+    def update_frame(self, frame, text):\
+        with self.lock:\
+            self.frame = frame; self.hud_text = text\
+\
+    def get_frame(self):\
+        with self.lock: return self.frame, self.hud_text\
+\
+    def get_live_counts(self):\
+        with self.lock:\
+            return self.counts.copy()\
+\
+    def increment_count(self, cls):\
+        with self.lock:\
+            if cls in self.counts: self.counts[cls] += 1\
+\
+    def get_and_reset_counts(self):\
+        with self.lock:\
+            data = self.counts.copy()\
+            # UPDATED: Added motorcycle to reset list\
+            self.counts = \{"car": 0, "truck": 0, "bus": 0, "motorcycle": 0, "person": 0\}\
+            return data\
+\
+    def stop(self):\
+        with self.lock:\
+            self.running = False\
+            if self.app_instance and hasattr(self.app_instance, 'pipeline'):\
+                 self.app_instance.pipeline.set_state(Gst.State.NULL)\
+    \
+    # CORRECTED: 'with the lock:' -> 'with self.lock:'\
+    def is_running(self):\
+        with self.lock: return self.running \
+\
+    def set_app(self, app):\
+        with self.lock: self.app_instance = app\
+\
+shared = SharedState()\
+\
+# --- Utility for IOU ---\
+def iou(boxA: Tuple[int, int, int, int], boxB: Tuple[int, int, int, int]) -> float:\
+    # Determine the (x, y)-coordinates of the intersection rectangle\
+    xA = max(boxA[0], boxB[0]); yA = max(boxA[1], boxB[1])\
+    xB = min(boxA[2], boxB[2]); yB = min(boxA[3], boxB[3])\
+\
+    # Compute the area of intersection rectangle\
+    interArea = max(0, xB - xA) * max(0, yB - yA)\
+\
+    # Compute the area of both the prediction and ground-truth rectangles\
+    boxAArea = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])\
+    boxBArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])\
+\
+    # Compute the intersection over union by taking the intersection area and dividing\
+    # it by the sum of prediction + ground-truth areas - the intersection area\
+    iou = interArea / float(boxAArea + boxBArea - interArea)\
+    return iou\
+\
+# --- Hailo callback class ---\
+class user_app_callback_class(app_callback_class):\
+    def __init__(self):\
+        super().__init__()\
+        # UPDATED: Added motorcycle\
+        self.allowed = \{"car", "truck", "bus", "motorcycle", "person"\} \
+        # Keep track of vehicle classes for filtering people who are riders\
+        self.vehicle_classes = \{"car", "truck", "bus", "motorcycle"\}\
+        self.tracker = SimpleCentroidTracker(); self._printed_once = False\
+\
+    def app_callback(self, pad, info, user_data):\
+        buffer = info.get_buffer()\
+        if buffer is None: return Gst.PadProbeReturn.OK\
+\
+        fmt, width, height = get_caps_from_pad(pad)\
+        frame = get_numpy_from_buffer(buffer, fmt, width, height)\
+        if frame is None: return Gst.PadProbeReturn.OK\
+        \
+        # ... (Frame preparation remains unchanged) ...\
+        if args.headless is False:\
+            try: frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)\
+            except Exception: frame_bgr = frame.copy()\
+            y = int(height * 2 / 3); A = (0, y); B = (width - 1, y)\
+            if not self._printed_once:\
+                print(f"
+\f1 \uc0\u9989 
+\f0  Frame=\{width\}x\{height\} fmt=\{fmt\} | LINE=0,\{y\},\{width-1\},\{y\}"); self._printed_once = True\
+        \
+        # --- Detection Processing ---\
+        roi = hailo.get_roi_from_buffer(buffer)\
+        detections = roi.get_objects_typed(hailo.HAILO_DETECTION)\
+        \
+        all_dets = []\
+        for det in detections:\
+             label = det.get_label()\
+             if label in self.allowed:\
+                 bbox = det.get_bbox()\
+                 w, h = frame.shape[1], frame.shape[0]\
+                 x1 = int(bbox.xmin() * w); y1 = int(bbox.ymin() * h)\
+                 x2 = int(bbox.xmax() * w); y2 = int(bbox.ymax() * h)\
+                 cx = int((x1 + x2) / 2); cy = int((y1 + y2) / 2)\
+                 all_dets.append(\{"cls": label, "centroid": (cx, cy), "xyxy": (x1, y1, x2, y2)\})\
+\
+        \
+        # --- NEW: Filtering Logic for Pedestrians (must be done before tracking) ---\
+        filtered_dets = []\
+        person_dets = [d for d in all_dets if d['cls'] == 'person']\
+        vehicle_dets = [d for d in all_dets if d['cls'] in self.vehicle_classes]\
+        \
+        # Keep track of person detections that are riders\
+        is_rider: Set[int] = set()\
+        \
+        # Check if a person is riding a motorcycle (or other vehicle) by checking bbox overlap\
+        for i, p_det in enumerate(person_dets):\
+            for v_det in vehicle_dets:\
+                # If person bounding box heavily overlaps with a vehicle bounding box, assume rider.\
+                # Threshold of 0.45 IOU is a good start for this purpose.\
+                if iou(p_det['xyxy'], v_det['xyxy']) > 0.45:\
+                    is_rider.add(i)\
+                    break # Once marked as rider, move to the next person\
+\
+        # Add all vehicle detections and only non-rider person detections\
+        filtered_dets.extend(vehicle_dets)\
+        for i, p_det in enumerate(person_dets):\
+            if i not in is_rider:\
+                filtered_dets.append(p_det)\
+        \
+        # --- Tracking and Crossing Logic ---\
+        tracks = self.tracker.update(filtered_dets, time.time())\
+        \
+        # ... (Crossing Logic remains unchanged) ...\
+        y = int(height * 2 / 3); A = (0, y); B = (width - 1, y) \
+\
+        for tr in tracks:\
+            s = side_of_line(tr.c, A, B)\
+            if tr.last_side == 0.0: tr.last_side = s; continue\
+\
+            crossed = (tr.last_side * s < 0) or (s == 0)\
+            if crossed and (not tr.crossed) and within_segment_bbox(tr.c, A, B, pad=180):\
+                tr.crossed = True; shared.increment_count(tr.cls)\
+\
+            tr.last_side = s\
+            \
+            # --- Display Drawing (only if NOT headless) ---\
+            if args.headless is False:\
+                cv2.putText(frame_bgr, f"\{tr.cls\} \{tr.id\}", (tr.c[0], tr.c[1]-10),\
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)\
+        \
+        # --- Display Drawing (only if NOT headless) ---\
+        if args.headless is False:\
+            cv2.line(frame_bgr, A, B, (0, 255, 255), 4)\
+            for det in filtered_dets: # Draw only the detections that were counted/tracked\
+                x1, y1, x2, y2 = det["xyxy"]\
+                color = (0, 255, 0) if det['cls'] != 'person' else (255, 0, 0) # Pedestrians in Blue, Vehicles in Green\
+                cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), color, 2)\
+            \
+            shared.update_frame(frame_bgr, None) \
+\
+\
+        return Gst.PadProbeReturn.OK\
+\
+# --- Background Thread: Firebase Sender (omitted for brevity, remains unchanged) ---\
+def run_firebase_loop(interval_sec: int):\
+    sender = FirebaseSender()\
+    print(f"
+\f1 \uc0\u55357 \u56613 
+\f0  Firebase Thread started. Sending every \{interval_sec\}s")\
+    \
+    last_send = time.time()\
+    while shared.is_running():\
+        time.sleep(1.0)\
+        now = time.time()\
+        \
+        if (now - last_send) >= interval_sec:\
+            counts = shared.get_and_reset_counts()\
+            total = sum(counts.values())\
+            \
+            payload = \{\
+                "ts": int(now * 1000), "windowSec": interval_sec,\
+                "siteId": sender.site_id, "cameraId": sender.camera_id,\
+                "counts": counts, "total": total,\
+            \}\
+            \
+            if total > 0 or sender.enabled:\
+                print(f"
+\f1 \uc0\u55357 \u56550 
+\f0  Sending Payload: \{json.dumps(payload)\}")\
+                sender.send(payload)\
+                \
+            last_send = now\
+    print("
+\f1 \uc0\u55357 \u56613 
+\f0  Firebase Thread stopping...")\
+\
+\
+# --- Helper for UI Thread (omitted for brevity, remains unchanged) ---\
+def get_current_live_counts_text(counts: Dict[str, int], interval_sec: int) -> list[str]:\
+    """Generates the text overlay for the current, accumulating counts."""\
+    total = sum(counts.values())\
+    lines = [\
+        f"--- LIVE COUNTS (\{interval_sec\}s Window) ---",\
+        f"Total Crossings: \{total\}",\
+        f"Cars: \{counts.get('car', 0)\}",\
+        f"Trucks: \{counts.get('truck', 0)\}",\
+        f"Buses: \{counts.get('bus', 0)\}",\
+        f"Motorcycles: \{counts.get('motorcycle', 0)\}",\
+        f"Pedestrians: \{counts.get('person', 0)\}", # Labeled as Pedestrians in the UI\
+    ]\
+    return lines\
+\
+\
+# --- OpenCV UI Loop (Non-Qt Thread) ---\
+def run_opencv_ui_loop(interval_sec):\
+    if args.headless is True:\
+        print("
+\f1 \uc0\u55357 \u56741 \u65039 
+\f0  Running in Headless Mode. No UI window or manual exit via 'q'.")\
+        while shared.is_running():\
+            time.sleep(1.0)\
+        return \
+\
+    print("
+\f1 \uc0\u55357 \u56741 \u65039 
+\f0  OpenCV UI Thread started")\
+    while shared.is_running():\
+        frame, _ = shared.get_frame()\
+        if frame is not None:\
+            live_counts = shared.get_live_counts()\
+            hud_lines = get_current_live_counts_text(live_counts, interval_sec)\
+            \
+            y_offset = 60\
+            for line in hud_lines:\
+                cv2.putText(frame, line, (20, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)\
+                y_offset += 30\
+\
+            cv2.imshow("Hailo Line Counter", frame)\
+            \
+            k = cv2.waitKey(1) & 0xFF\
+            if k == ord('q'):\
+                print("
+\f1 \uc0\u55357 \u57041 
+\f0  Q pressed. Stopping...")\
+                shared.stop()\
+                return\
+\
+        time.sleep(0.01)\
+    \
+    cv2.destroyAllWindows()\
+\
+\
+# --- Custom Pipeline String for Headless Mode (omitted for brevity, remains unchanged) ---\
+HEADLESS_PIPELINE = """\
+v4l2src device=/dev/video0 name=source ! image/jpeg, framerate=30/1, width=1280, height=720 ! queue name=source_queue_decode leaky=no max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! decodebin name=source_decodebin ! videoflip name=videoflip video-direction=horiz ! queue name=source_scale_q leaky=no max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! videoscale name=source_videoscale n-threads=2 ! queue name=source_convert_q leaky=no max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! videoconvert n-threads=3 name=source_convert qos=false ! video/x-raw, pixel-aspect-ratio=1/1, format=RGB, width=1280, height=720 ! videorate name=source_videorate ! capsfilter name=source_fps_caps caps="video/x-raw, framerate=30/1" ! queue name=inference_wrapper_input_q leaky=no max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! hailocropper name=inference_wrapper_crop so-path=/usr/lib/aarch64-linux-gnu/hailo/tappas/post_processes/cropping_algorithms/libwhole_buffer.so function-name=create_crops use-letterbox=true resize-method=inter-area internal-offset=true hailoaggregator name=inference_wrapper_agg inference_wrapper_crop. ! queue name=inference_wrapper_bypass_q leaky=no max-size-buffers=20 max-size-bytes=0 max-size-time=0 ! inference_wrapper_agg.sink_0 inference_wrapper_crop. ! queue name=inference_scale_q leaky=no max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! videoscale name=inference_videoscale n-threads=2 qos=false ! queue name=inference_convert_q leaky=no max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! video/x-raw, pixel-aspect-ratio=1/1 ! videoconvert name=inference_videoconvert n-threads=2 ! queue name=inference_hailonet_q leaky=no max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! hailonet name=inference_hailonet hef-path=/usr/local/hailo/resources/models/hailo8/yolov8m.hef batch-size=2 vdevice-group-id=1 nms-score-threshold=0.3 nms-iou-threshold=0.45 output-format-type=HAILO_FORMAT_TYPE_FLOAT32 force-writable=true ! queue name=inference_hailofilter_q leaky=no max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! hailofilter name=inference_hailofilter so-path=/usr/local/hailo/resources/so/libyolo_hailortpp_postprocess.so function-name=filter_letterbox qos=false ! queue name=inference_output_q leaky=no max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! inference_wrapper_agg.sink_1 inference_wrapper_agg. ! queue name=inference_wrapper_output_q leaky=no max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! hailotracker name=hailo_tracker class-id=1 kalman-dist-thr=0.8 iou-thr=0.9 init-iou-thr=0.7 keep-new-frames=2 keep-tracked-frames=15 keep-lost-frames=2 keep-past-metadata=False qos=False ! queue name=hailo_tracker_q leaky=no max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! queue name=identity_callback_q leaky=no max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! identity name=identity_callback ! queue name=fakesink_q leaky=no max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! fakesink sync=false\
+"""\
+\
+# --- MAIN (omitted for brevity, remains unchanged) ---\
+def main():\
+    global args \
+\
+    # --- Argument Parsing for Headless Mode (Parses all args, sets global 'args' variable) ---\
+    parser = argparse.ArgumentParser(description="Hailo Line Counter and Firebase Sender.")\
+    parser.add_argument('--headless', action='store_true', help='Run without the OpenCV display window (uses fakesink).')\
+    \
+    # Add existing arguments required by GStreamerDetectionApp (source, arch)\
+    parser.add_argument('--input', type=str, required=True, help='Input source (e.g., usb, mipi, file)')\
+    parser.add_argument('--arch', type=str, required=True, help='Hailo architecture (e.g., hailo8)')\
+    \
+    args, unknown = parser.parse_known_args()\
+    \
+    load_project_env()\
+    Gst.init(None)\
+\
+    send_every = int(safe_env_get("SEND_EVERY_SEC", "15").strip())\
+    \
+    # 1. Start Background Threads\
+    t_firebase = threading.Thread(target=run_firebase_loop, args=(send_every,), daemon=True)\
+    t_firebase.start()\
+    \
+    # 2. Start UI Thread (will immediately return if args.headless is True)\
+    t_ui = threading.Thread(target=run_opencv_ui_loop, args=(send_every,), daemon=True)\
+    t_ui.start()\
+\
+    # 3. Modify the GStreamerDetectionApp class variable if running headless\
+    if args.headless:\
+        print("
+\f1 \uc0\u55357 \u56615 
+\f0  Overriding GStreamerDetectionApp.PIPELINE_STRING for headless mode...")\
+        GStreamerDetectionApp.PIPELINE_STRING = HEADLESS_PIPELINE\
+        \
+        # CRITICAL FIX: Remove the '--headless' argument from sys.argv \
+        if '--headless' in sys.argv:\
+            sys.argv.remove('--headless')\
+    \
+    # 4. Initialize App in MAIN THREAD\
+    user_cb = user_app_callback_class()\
+    \
+    # The GStreamerDetectionApp now parses the filtered sys.argv\
+    app = GStreamerDetectionApp(user_cb.app_callback, user_cb)\
+    \
+    # 5. Save app instance\
+    shared.set_app(app)\
+\
+    # 6. Run App in MAIN THREAD\
+    print("
+\f1 \uc0\u55357 \u56960 
+\f0  Starting GStreamer App (Main Thread)...")\
+    try:\
+        app.run() \
+    except KeyboardInterrupt:\
+        print("
+\f1 \uc0\u55357 \u56395 
+\f0  Ctrl+C detected. Exiting...")\
+    except Exception as e:\
+        print(f"Main Loop Error: \{e\}")\
+    finally:\
+        shared.stop()\
+\
+\
+if __name__ == "__main__":\
+    main()\
+PY\
+\pard\pardeftab720\sa280\partightenfactor0
+
+\f1\fs28 \cf0 \uc0\u55356 \u57283 
+\f2\b  Rerun the Application\
+\pard\pardeftab720\sa240\partightenfactor0
+
+\f3\b0\fs24 \cf0 This is a pure syntax fix and should resolve the issue, allowing the script to initialize and run in headless mode.\
+Please execute the command once more:\
+\pard\pardeftab720\partightenfactor0
+\cf0 Bash\
+\
+\pard\pardeftab720\partightenfactor0
+
+\f0\fs26 \cf0 bash -c "source /home/shawnshlee/hailo-rpi5-examples/setup_env.sh && cd /home/shawnshlee/hailo-rpi5-examples/basic_pipelines && python3 line_counter_firebase.py --input usb --arch hailo8 --headless"\
+\pard\pardeftab720\sa240\partightenfactor0
+
+\f3\fs24 \cf0 If successful, you will see the environment setup messages, the pipeline override message, the thread starts, and then the final 
+\f1\fs26 \uc0\u55357 \u56960 
+\f0  Starting GStreamer App (Main Thread)...
+\f3\fs24  message, followed by the Firebase transmissions.\
+\
+python basic_pipelines/line_counter_firebase.py\
+\
+Unfreeze Rpi py\
+chmod 644 /opt/linecounter/hailo-rpi5-examples/basic_pipelines/line_counter_firebase.py\
+}

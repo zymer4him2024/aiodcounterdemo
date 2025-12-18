@@ -1,0 +1,46 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Allow read access to sites collection for dashboard
+    match /sites/{siteId} {
+      // Allow reading the site document
+      allow read: if true;
+      
+      // Allow reading cameras subcollection
+      match /cameras/{cameraId} {
+        // Allow reading camera documents
+        allow read: if true;
+        
+        // Allow reading windows subcollection (historical data)
+        match /windows/{windowId} {
+          allow read: if true;
+        }
+        
+        // Allow reading daily subcollection (aggregated data)
+        match /daily/{dateId} {
+          allow read: if true;
+        }
+        
+        // Allow reading monthly subcollection (monthly aggregated data)
+        match /monthly/{monthId} {
+          allow read: if true;
+        }
+        
+        // Allow reading monthlyArchive subcollection (historical monthly data)
+        match /monthlyArchive/{monthId} {
+          allow read: if true;
+        }
+      }
+    }
+    
+    // Deny all other access by default
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
+
+
+
+
+
