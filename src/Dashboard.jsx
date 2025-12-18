@@ -87,32 +87,57 @@ export default function Dashboard() {
   ], [t]);
 
   useEffect(() => {
+    console.log(`📊 Dashboard: Fetching data for siteId=${siteId}, cameraId=${cameraId}, dayId=${dayId}, monthId=${monthId}`);
+    
     const camRef = doc(db, "sites", siteId, "cameras", cameraId);
-    const unsub1 = onSnapshot(camRef, (snap) => setLatest(snap.exists() ? snap.data()?.latest : null));
+    const unsub1 = onSnapshot(camRef, (snap) => {
+      const data = snap.exists() ? snap.data()?.latest : null;
+      console.log(`📡 Latest snapshot:`, data ? "✅ Data found" : "❌ No data");
+      setLatest(data);
+    }, (error) => {
+      console.error("❌ Error fetching latest snapshot:", error);
+    });
 
     const dayRef = doc(db, "sites", siteId, "cameras", cameraId, "daily", dayId);
-    const unsub2 = onSnapshot(dayRef, (snap) => setTodayAgg(snap.exists() ? snap.data() : null));
+    const unsub2 = onSnapshot(dayRef, (snap) => {
+      const data = snap.exists() ? snap.data() : null;
+      console.log(`📅 Daily aggregate (${dayId}):`, data ? "✅ Data found" : "❌ No data");
+      setTodayAgg(data);
+    }, (error) => {
+      console.error("❌ Error fetching daily aggregate:", error);
+    });
 
     const monthRef = doc(db, "sites", siteId, "cameras", cameraId, "monthly", monthId);
-    const unsub3 = onSnapshot(monthRef, (snap) => setMonthlyAgg(snap.exists() ? snap.data() : null));
+    const unsub3 = onSnapshot(monthRef, (snap) => {
+      const data = snap.exists() ? snap.data() : null;
+      console.log(`📆 Monthly aggregate (${monthId}):`, data ? "✅ Data found" : "❌ No data");
+      setMonthlyAgg(data);
+    }, (error) => {
+      console.error("❌ Error fetching monthly aggregate:", error);
+    });
 
     // load last 14 days (simple list; you can chart it later)
     (async () => {
-      const q = query(
-        collection(db, "sites", siteId, "cameras", cameraId, "daily"),
-        orderBy("__name__", "desc"),
-        limit(14)
-      );
-      const snap = await getDocs(q);
-      const rows = snap.docs.map((d) => {
-        const data = d.data();
-        return {
-          id: d.id,
-          ...data,
-          totals: normalizeCounts(data.totals || {})
-        };
-      }).reverse();
-      setDailyList(rows);
+      try {
+        const q = query(
+          collection(db, "sites", siteId, "cameras", cameraId, "daily"),
+          orderBy("__name__", "desc"),
+          limit(14)
+        );
+        const snap = await getDocs(q);
+        console.log(`📋 Daily list query: Found ${snap.docs.length} documents`);
+        const rows = snap.docs.map((d) => {
+          const data = d.data();
+          return {
+            id: d.id,
+            ...data,
+            totals: normalizeCounts(data.totals || {})
+          };
+        }).reverse();
+        setDailyList(rows);
+      } catch (error) {
+        console.error("❌ Error fetching daily list:", error);
+      }
     })();
 
     return () => {
@@ -157,6 +182,9 @@ export default function Dashboard() {
     const all = (totals.total || 0) || (veh + ped);
     return { veh, ped, all };
   }, [totals]);
+  
+  // Check if we have any data at all
+  const hasAnyData = latest !== null || todayAgg !== null || monthlyAgg !== null || dailyList.length > 0;
 
   return (
     <div style={{ padding: 20, fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Arial" }}>
@@ -165,6 +193,30 @@ export default function Dashboard() {
         <LanguageToggle />
       </div>
       <p>{t("site")}: <b>{siteId}</b> · {t("camera")}: <b>{cameraId}</b> · {t("today")}: <b>{dayId}</b></p>
+      
+      {!hasAnyData && (
+        <div style={{ 
+          padding: 20, 
+          margin: "20px 0", 
+          backgroundColor: "#1a1a1a", 
+          border: "1px solid #444", 
+          borderRadius: 8,
+          color: "#ffa500"
+        }}>
+          <h3>⚠️ No Data Found</h3>
+          <p>The dashboard is connected to Firebase, but no data has been found yet.</p>
+          <p><strong>To get data:</strong></p>
+          <ul style={{ marginLeft: 20 }}>
+            <li>Make sure data is being sent to the staging Firebase project</li>
+            <li>Check that the Cloud Function is deployed and receiving data</li>
+            <li>Verify the siteId and cameraId match: <code>site-001</code> / <code>usb-cam-1</code></li>
+            <li>Check browser console for connection status and errors</li>
+          </ul>
+          <p style={{ marginTop: 10, fontSize: "0.9em", opacity: 0.8 }}>
+            Console logs will show: ✅ Data found or ❌ No data for each query
+          </p>
+        </div>
+      )}
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(240px, 1fr))", gap: 12 }}>
         <Card title={t("liveWindow")}>
