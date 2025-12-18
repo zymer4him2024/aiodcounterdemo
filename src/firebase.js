@@ -22,17 +22,15 @@ const productionConfig = {
   measurementId: process.env.REACT_APP_FIREBASE_MEASUREMENT_ID || "G-9KD244LGND"
 };
 
-// Staging Firebase config
-// Note: You may need to create a web app in staging project and get the actual config values
-// For now, using production values but with staging projectId
+// Staging Firebase config (actual values from staging project)
 const stagingConfig = {
-  apiKey: process.env.REACT_APP_FIREBASE_API_KEY_STAGING || productionConfig.apiKey,
+  apiKey: process.env.REACT_APP_FIREBASE_API_KEY_STAGING || "AIzaSyBF1KGIN4hqG3xgsR7kVBbZmUNJTTHgeck",
   authDomain: process.env.REACT_APP_FIREBASE_AUTH_DOMAIN_STAGING || "aiodcounter03-staging.firebaseapp.com",
-  projectId: process.env.REACT_APP_FIREBASE_PROJECT_ID_STAGING || "aiodcounter03-staging", // KEY: This must be staging project ID
+  projectId: process.env.REACT_APP_FIREBASE_PROJECT_ID_STAGING || "aiodcounter03-staging",
   storageBucket: process.env.REACT_APP_FIREBASE_STORAGE_BUCKET_STAGING || "aiodcounter03-staging.firebasestorage.app",
-  messagingSenderId: process.env.REACT_APP_FIREBASE_MESSAGING_SENDER_ID_STAGING || productionConfig.messagingSenderId,
-  appId: process.env.REACT_APP_FIREBASE_APP_ID_STAGING || productionConfig.appId,
-  measurementId: process.env.REACT_APP_FIREBASE_MEASUREMENT_ID_STAGING || productionConfig.measurementId
+  messagingSenderId: process.env.REACT_APP_FIREBASE_MESSAGING_SENDER_ID_STAGING || "501380809932",
+  appId: process.env.REACT_APP_FIREBASE_APP_ID_STAGING || "1:501380809932:web:dc9869846593a18574ee69",
+  measurementId: process.env.REACT_APP_FIREBASE_MEASUREMENT_ID_STAGING || "G-HK6FJ4SJ9M"
 };
 
 const firebaseConfig = isStaging ? stagingConfig : productionConfig;
