@@ -32,8 +32,10 @@ service cloud.firestore {
         }
         
         // Allow reading hourly subcollection (pre-aggregated hourly data)
+        // Allow both document reads and collection queries
         match /hourly/{hourId} {
-          allow read: if true;
+          allow get: if true;
+          allow list: if true;
         }
       }
     }
