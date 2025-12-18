@@ -773,13 +773,47 @@ function DynamicPricingSection({ dayparts, totals, cameraId, siteId, t }) {
           "hourly"
         );
 
-        const q = query(
-          hourlyRef,
-          where("dateStr", "==", todayStr),
-          orderBy("hour", "asc")
-        );
-
-        const snapshot = await getDocs(q);
+        let snapshot;
+        try {
+          // Try query with orderBy (requires composite index)
+          const q = query(
+            hourlyRef,
+            where("dateStr", "==", todayStr),
+            orderBy("hour", "asc")
+          );
+          snapshot = await getDocs(q);
+        } catch (queryError) {
+          // If query fails (index not ready or permission issue), try without orderBy
+          console.warn("Query with orderBy failed, trying without orderBy:", queryError);
+          try {
+            const qSimple = query(
+              hourlyRef,
+              where("dateStr", "==", todayStr)
+            );
+            const simpleSnapshot = await getDocs(qSimple);
+            // Sort manually if we got data
+            if (!simpleSnapshot.empty) {
+              const docs = simpleSnapshot.docs.sort((a, b) => {
+                const hourA = a.data().hour || 0;
+                const hourB = b.data().hour || 0;
+                return hourA - hourB;
+              });
+              // Create a QuerySnapshot-like object with sorted docs
+              snapshot = {
+                forEach: (callback) => docs.forEach((doc) => callback(doc)),
+                empty: docs.length === 0,
+                size: docs.length,
+                docs: docs
+              };
+            } else {
+              snapshot = simpleSnapshot;
+            }
+          } catch (simpleError) {
+            console.error("Both query attempts failed, using fallback:", simpleError);
+            // If both queries fail, throw to trigger fallback to dayparts
+            throw simpleError;
+          }
+        }
         const hourlyDataMap = {};
         
         snapshot.forEach((doc) => {
