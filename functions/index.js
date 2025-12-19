@@ -153,20 +153,29 @@ exports.ingestCounts = functions.https.onRequest(async (req, res) => {
       // Continue with normal flow if check fails
     }
 
+    // Calculate congestion score for dwell time estimation
+    // Higher vehicle count + pedestrians in a window = higher congestion
+    // Normalized per second to account for variable window sizes
+    const totalCount = safeNum(total);
+    const vehicleCount = safeNum(counts.car || 0) + safeNum(counts.truck || 0) + 
+                        safeNum(counts.bus || 0) + safeNum(counts.motorcycle || 0);
+    const congestionScore = Math.round((totalCount / windowSec) * 100); // Normalized score
+
     // Write window and camera snapshot in transaction
     await db.runTransaction(async (tx) => {
-      // Write raw window (history)
+      // Write raw window (history) with congestion score
       tx.set(winRef, {
         ts,
         windowSec,
         counts,
         total,
+        congestionScore, // NEW: Add congestion metric for dwell time analysis
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
       }, { merge: true });
 
-      // Update latest snapshot for dashboard
+      // Update latest snapshot for dashboard with congestion score
       tx.set(camRef, {
-        latest: { ts, windowSec, counts, total },
+        latest: { ts, windowSec, counts, total, congestionScore },
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       }, { merge: true });
     });
@@ -189,6 +198,10 @@ exports.ingestCounts = functions.https.onRequest(async (req, res) => {
           afternoon: { total: 0, car: 0, truck: 0, bus: 0, motorcycle: 0, person: 0 },
           evening: { total: 0, car: 0, truck: 0, bus: 0, motorcycle: 0, person: 0 },
           night: { total: 0, car: 0, truck: 0, bus: 0, motorcycle: 0, person: 0 }
+        },
+        metrics: {
+          avgCongestion: congestionScore,
+          congestionSamples: 1
         },
         updatedAt: admin.firestore.FieldValue.serverTimestamp()
       };
@@ -254,15 +267,23 @@ exports.ingestCounts = functions.https.onRequest(async (req, res) => {
         // Update the current daypart
         newDayparts[daypart] = newDaypart;
         
+        // Update congestion metrics for dwell time analysis
+        const currentMetrics = currentData.metrics || { avgCongestion: 0, congestionSamples: 0 };
+        const newMetrics = {
+          avgCongestion: Math.round(safeNum(currentMetrics.avgCongestion || 0) + safeNum(congestionScore)),
+          congestionSamples: Math.round(safeNum(currentMetrics.congestionSamples || 0) + 1)
+        };
+        
         // Write the complete document inside transaction
         const newData = {
           timeZone,
           totals: newTotals,
           dayparts: newDayparts,
+          metrics: newMetrics, // NEW: Track congestion for dwell time estimation
           updatedAt: admin.firestore.FieldValue.serverTimestamp()
         };
         
-        console.log(`Transaction: old total=${currentData.totals?.total || 0}, new total=${newTotals.total}, daypart=${daypart}`);
+        console.log(`Transaction: old total=${currentData.totals?.total || 0}, new total=${newTotals.total}, daypart=${daypart}, congestion=${congestionScore}`);
         tx.set(dayRef, newData);
       });
       console.log("Successfully updated daily aggregates using transaction");

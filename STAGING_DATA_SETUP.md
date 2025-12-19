@@ -78,3 +78,5 @@ export FIREBASE_API_KEY_STAGING="your-api-key"
 - Check browser console for errors
 - Verify `siteId` and `cameraId` match: `site-001` / `usb-cam-1`
 
+
+

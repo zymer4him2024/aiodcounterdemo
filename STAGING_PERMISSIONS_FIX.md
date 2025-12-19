@@ -58,3 +58,5 @@ Once index is built:
 - Hourly charts should display data (if data exists)
 - Query should work: `where("dateStr", "==", todayStr).orderBy("hour", "asc")`
 
+
+

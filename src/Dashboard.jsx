@@ -182,6 +182,150 @@ export default function Dashboard() {
     const all = (totals.total || 0) || (veh + ped);
     return { veh, ped, all };
   }, [totals]);
+
+  // Rider Analytics - Motorcycle + Person detection for delivery/commuter insights
+  const riderAnalytics = useMemo(() => {
+    const motorcycles = totals.motorcycle || 0;
+    const persons = totals.person || 0;
+    
+    // Estimate riders: assume 30% of persons are motorcycle passengers
+    const estimatedRiders = Math.min(motorcycles, Math.round(persons * 0.3));
+    const soloRiders = motorcycles - estimatedRiders;
+    const pedestrians = persons - estimatedRiders;
+    
+    return {
+      totalMotorcycles: motorcycles,
+      estimatedRiders,
+      soloRiders,
+      pedestrians,
+      riderPercentage: motorcycles > 0 ? Math.round((estimatedRiders / motorcycles) * 100) : 0
+    };
+  }, [totals]);
+
+  // Audience Profile - Socioeconomic proxy based on vehicle classification mix
+  const audienceProfile = useMemo(() => {
+    const totalVehicles = (totals.car || 0) + (totals.truck || 0) + 
+                          (totals.bus || 0) + (totals.motorcycle || 0);
+    
+    if (totalVehicles === 0) return null;
+    
+    const busPercentage = Math.round((totals.bus / totalVehicles) * 100);
+    const truckPercentage = Math.round((totals.truck / totalVehicles) * 100);
+    const carPercentage = Math.round((totals.car / totalVehicles) * 100);
+    const motorcyclePercentage = Math.round((totals.motorcycle / totalVehicles) * 100);
+    
+    // Determine audience profile
+    let profile = t("mixedAudience");
+    let targetRecommendation = t("massMarketProducts");
+    
+    if (busPercentage > 40) {
+      profile = t("massTransitDominant");
+      targetRecommendation = t("massMarketProducts");
+    } else if (truckPercentage > 30) {
+      profile = t("commercialIndustrial");
+      targetRecommendation = t("b2bServices");
+    } else if (carPercentage > 60) {
+      profile = t("commuterMiddleIncome");
+      targetRecommendation = t("consumerGoods");
+    }
+    
+    return {
+      profile,
+      targetRecommendation,
+      busPercentage,
+      truckPercentage,
+      carPercentage,
+      motorcyclePercentage
+    };
+  }, [totals, t]);
+
+  // Congestion Index & Dwell Time estimation - uses real data from backend
+  const congestionIndex = useMemo(() => {
+    // Get congestion data from daily aggregates (calculated by Cloud Function)
+    const avgCongestion = todayAgg?.metrics?.avgCongestion || 0;
+    const samples = todayAgg?.metrics?.congestionSamples || 1;
+    const normalizedCongestion = avgCongestion / samples;
+    
+    // Fallback: estimate from current traffic if no backend data yet
+    const fallbackScore = (trafficMix.veh * 10);
+    const congestionScore = normalizedCongestion > 0 ? normalizedCongestion : fallbackScore;
+    
+    let status = t("lowCongestion");
+    let color = "#51CF66";
+    let dwellEstimate = t("dwellTimeLess30sec");
+    let value = t("lowValue");
+    
+    if (congestionScore > 300) {
+      status = t("highCongestion");
+      color = "#FF6B6B";
+      dwellEstimate = t("dwellTime2to5min");
+      value = t("highValue");
+    } else if (congestionScore > 150) {
+      status = t("mediumCongestion");
+      color = "#FFD700";
+      dwellEstimate = t("dwellTime30to120sec");
+      value = t("standardValue");
+    }
+    
+    return { status, color, dwellEstimate, value, score: Math.round(congestionScore) };
+  }, [todayAgg, trafficMix, t]);
+
+  // Live Advertising Triggers - threshold-based alerts
+  const [triggers, setTriggers] = useState([]);
+
+  useEffect(() => {
+    const checkTriggers = () => {
+      const newTriggers = [];
+      const recentWindow = latest?.counts || {};
+      
+      // Trigger 1: High bus count (transit spike)
+      if (recentWindow.bus >= 3) {
+        newTriggers.push({
+          type: "HIGH_TRANSIT",
+          message: t("highTransit"),
+          action: t("triggerTransitAd"),
+          priority: "high"
+        });
+      }
+      
+      // Trigger 2: Pedestrian spike (lunch rush)
+      if (recentWindow.person >= 15) {
+        newTriggers.push({
+          type: "PEDESTRIAN_SPIKE",
+          message: t("pedestrianSpike"),
+          action: t("triggerRestaurantAd"),
+          priority: "premium"
+        });
+      }
+      
+      // Trigger 3: High vehicle congestion
+      const vehicles = (recentWindow.car || 0) + (recentWindow.truck || 0);
+      if (vehicles >= 20) {
+        newTriggers.push({
+          type: "TRAFFIC_JAM",
+          message: t("trafficJam"),
+          action: t("triggerHighEngagementAd"),
+          priority: "premium"
+        });
+      }
+      
+      setTriggers(newTriggers);
+    };
+    
+    if (latest) {
+      checkTriggers();
+    }
+  }, [latest, t]);
+
+  // Share of Voice - mock data for concept demonstration
+  const shareOfVoice = useMemo(() => {
+    const totalImpressions = totals.total || 1;
+    return [
+      { brand: "Brand A", impressions: Math.round(totalImpressions * 0.4), percentage: 40, color: "#4C8EFF" },
+      { brand: "Brand B", impressions: Math.round(totalImpressions * 0.35), percentage: 35, color: "#FFD700" },
+      { brand: "Brand C", impressions: Math.round(totalImpressions * 0.25), percentage: 25, color: "#51CF66" }
+    ];
+  }, [totals]);
   
   // Check if we have any data at all
   const hasAnyData = latest !== null || todayAgg !== null || monthlyAgg !== null || dailyList.length > 0;
@@ -245,6 +389,121 @@ export default function Dashboard() {
           <Hr />
           <Small>
             {t("useForPlacements")}
+          </Small>
+        </Card>
+      </div>
+
+      {/* Advanced OOH Analytics - Row 2 */}
+      <h2 style={{ marginTop: 32, marginBottom: 16 }}>Advanced Audience & Engagement Analytics</h2>
+      
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(240px, 1fr))", gap: 12, marginBottom: 20 }}>
+        {/* Rider Analytics */}
+        <Card title={t("riderAnalytics")}>
+          <Row label={t("totalMotorcycles")} value={riderAnalytics.totalMotorcycles} />
+          <Row label={t("estimatedRiders")} value={riderAnalytics.estimatedRiders} />
+          <Row label={t("soloRiders")} value={riderAnalytics.soloRiders} />
+          <Row label={t("riderPercentage")} value={`${riderAnalytics.riderPercentage}%`} />
+          <Hr />
+          <Small>{t("riderDesc")}</Small>
+        </Card>
+
+        {/* Audience Profile */}
+        <Card title={t("audienceProfile")}>
+          {audienceProfile ? (
+            <>
+              <Big style={{ fontSize: 24 }}>{audienceProfile.profile}</Big>
+              <Small>{t("socioeconomicProxy")}</Small>
+              <Hr />
+              <Row label={t("publicTransit")} value={`${audienceProfile.busPercentage}%`} />
+              <Row label={t("commercial")} value={`${audienceProfile.truckPercentage}%`} />
+              <Row label={t("personalVehicles")} value={`${audienceProfile.carPercentage}%`} />
+              <Hr />
+              <Small><b>{t("targetAudience")}:</b> {audienceProfile.targetRecommendation}</Small>
+            </>
+          ) : (
+            <Small>No vehicle data available</Small>
+          )}
+        </Card>
+
+        {/* Congestion & Dwell Time */}
+        <Card title={t("congestionDwellTime")}>
+          <Big style={{ color: congestionIndex.color }}>{congestionIndex.status}</Big>
+          <Small>{t("congestionIndex")}</Small>
+          <Hr />
+          <Row label={t("estDwellTime")} value={congestionIndex.dwellEstimate} />
+          <Row label={t("adValue")} value={congestionIndex.value} />
+          <Hr />
+          <Small>{t("congestionDesc")}</Small>
+        </Card>
+      </div>
+
+      {/* Live Advertising Triggers */}
+      {triggers.length > 0 && (
+        <Card title={t("liveAdvertisingTriggers")} style={{ 
+          marginBottom: 20,
+          background: "linear-gradient(135deg, #1a1a1a 0%, #2d1a1a 100%)",
+          border: "2px solid #FF6B6B"
+        }}>
+          {triggers.map((trigger, i) => (
+            <div key={i} style={{
+              padding: 12,
+              marginTop: i > 0 ? 12 : 0,
+              background: "#2a1a1a",
+              borderRadius: 8,
+              borderLeft: `4px solid ${trigger.priority === 'premium' ? '#FF6B6B' : '#FFD700'}`
+            }}>
+              <div style={{ fontWeight: 700, color: "#FF6B6B" }}>{trigger.message}</div>
+              <div style={{ fontSize: 12, marginTop: 4, opacity: 0.8 }}>
+                → {trigger.action}
+              </div>
+            </div>
+          ))}
+        </Card>
+      )}
+
+      {/* Share of Voice & Store Attribution - Row 3 */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 12, marginBottom: 20 }}>
+        {/* Share of Voice */}
+        <Card title={t("shareOfVoice")}>
+          <div style={{ marginBottom: 12 }}>
+            <Small>{t("sovDesc")}</Small>
+          </div>
+          {shareOfVoice.map((brand, i) => (
+            <div key={i} style={{ marginBottom: 12 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                <span>{brand.brand}</span>
+                <b>{brand.percentage}%</b>
+              </div>
+              <div style={{
+                height: 8,
+                background: "#333",
+                borderRadius: 4,
+                overflow: "hidden"
+              }}>
+                <div style={{
+                  height: "100%",
+                  width: `${brand.percentage}%`,
+                  background: brand.color,
+                  transition: "width 0.3s"
+                }}></div>
+              </div>
+              <div style={{ fontSize: 11, opacity: 0.7, marginTop: 2 }}>
+                {brand.impressions.toLocaleString()} {t("brandImpressions")}
+              </div>
+            </div>
+          ))}
+        </Card>
+
+        {/* Store Visit Attribution */}
+        <Card title={t("storeVisitAttribution")}>
+          <Small>{t("multiCameraFeature")}</Small>
+          <Hr />
+          <Row label={t("boardImpressions")} value={Math.round(totals.total || 0)} />
+          <Row label={t("estStoreVisits")} value="—" />
+          <Row label={t("attributionRate")} value="—" />
+          <Hr />
+          <Small>
+            {t("storeVisitDesc")}
           </Small>
         </Card>
       </div>

@@ -63,3 +63,5 @@ class FirebaseSender:
             print(f"❌ {env_name} send exception: {e}")
             # Exception is caught - doesn't stop other send
 
+
+
